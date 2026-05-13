@@ -901,9 +901,6 @@ def enrich_unmatched_risk(unmatched_df, matched_df):
         if pd.notna(pod_det_days) and pod_det_days > global_avg_pod_det:
             reasons.append(f"POD detention {pod_det_days:.1f}d vs avg {global_avg_pod_det:.1f}d")
             score += 1
-        if bool(row.get("DET_ACCUMULATING")):
-            reasons.append("ACTIVE with no CER; POD detention still accumulating")
-            score += 1
         risk_flags.append(score > 0)
         risk_score.append(score)
         risk_reasons.append("; ".join(reasons) if reasons else "No above-average dwell risk detected")
@@ -965,8 +962,6 @@ def build_download_df(data):
         "COMBINED_FREE_DAYS": "Combined Free Days",
         "IKEA_DEM_RATE": "IKEA Demurrage Rate (USD/day)",
         "IKEA_DET_RATE": "IKEA Detention Rate (USD/day)",
-        "DET_ACCUMULATING": "Detention Still Accumulating",
-        "DET_END_SOURCE": "Detention End Date Source",
         "MATCH_KEY": "Contract Match Key",
     }
     dl = dl.rename(columns={k: v for k, v in rename_map.items() if k in dl.columns})
@@ -984,7 +979,7 @@ def build_download_df(data):
         "POD Demurrage Total Days", "POD Demurrage Chargeable Days", "POD Demurrage Cost (USD)",
         "POD Detention Total Days", "POD Detention Chargeable Days", "POD Detention Cost (USD)",
         "Total Demurrage Cost (USD)", "Total Detention Cost (USD)", "Total D&D Cost (USD)",
-        "Detention Still Accumulating", "Detention End Date Source", "Contract Match Key",
+        "Contract Match Key",
     ]
     existing = [c for c in desired_order if c in dl.columns]
     remaining = [c for c in dl.columns if c not in existing]
@@ -1253,14 +1248,13 @@ with tab_overview:
         c3.metric("POD Demurrage", f"${fdf['POD_DEM_COST'].sum():,.0f}", f"{(fdf['POD_DEM_COST'] > 0).sum()} shipments")
         c4.metric("POD Detention", f"${fdf['POD_DET_COST'].sum():,.0f}", f"{(fdf['POD_DET_COST'] > 0).sum()} shipments")
 
-        c1, c2, c3, c4 = st.columns(4)
+        c1, c2, c3 = st.columns(3)
         avg_pol_dem = fdf.loc[fdf["POL_DEM_COST"] > 0, "POL_DEM_CHARGEABLE_DAYS"].mean()
         avg_pod_dem = fdf.loc[fdf["POD_DEM_COST"] > 0, "POD_DEM_CHARGEABLE_DAYS"].mean()
         avg_det = fdf.loc[fdf["POD_DET_COST"] > 0, "POD_DET_CHARGEABLE_DAYS"].mean()
         c1.metric("Avg POL Dem Days", f"{avg_pol_dem:.1f}d" if not np.isnan(avg_pol_dem) else "—")
         c2.metric("Avg POD Dem Days", f"{avg_pod_dem:.1f}d" if not np.isnan(avg_pod_dem) else "—")
         c3.metric("Avg POD Det Days", f"{avg_det:.1f}d" if not np.isnan(avg_det) else "—")
-        c4.metric("⚠️ Accumulating", f"{fdf['DET_ACCUMULATING'].sum()}", "ACTIVE, no CER")
         if cancelled_count > 0:
             st.caption(f"ℹ️ {cancelled_count} cancelled shipments excluded from analysis.")
 
@@ -1318,13 +1312,11 @@ with tab_trends:
                 POL_Demurrage=("POL_DEM_COST", "sum"), POD_Demurrage=("POD_DEM_COST", "sum"), Detention=("POD_DET_COST", "sum"),
                 Total=("TOTAL_DD_COST", "sum"),
                 Avg_POL_Dem_Days=("POL_DEM_CHARGEABLE_DAYS", "mean"), Avg_POD_Dem_Days=("POD_DEM_CHARGEABLE_DAYS", "mean"), Avg_Det_Days=("POD_DET_CHARGEABLE_DAYS", "mean"),
-                Accumulating=("DET_ACCUMULATING", "sum"),
             ).reset_index().sort_values("PERIOD")
-            c1, c2, c3, c4 = st.columns(4)
+            c1, c2, c3 = st.columns(3)
             c1.metric("Periods", f"{len(trend_agg):,}")
             c2.metric("Total Cost", f"${trend_agg['Total'].sum():,.0f}")
             c3.metric("Avg Cost / Shipment", f"${(trend_agg['Total'].sum() / max(trend_agg['Shipments'].sum(), 1)):,.0f}")
-            c4.metric("Accumulating", f"{int(trend_agg['Accumulating'].sum()):,}", "ACTIVE, no CER")
             cost_melt = trend_agg.melt(id_vars=["PERIOD"], value_vars=["POL_Demurrage", "POD_Demurrage", "Detention"], var_name="Charge Type", value_name="Cost")
             cost_melt["Charge Type"] = cost_melt["Charge Type"].replace({"POL_Demurrage": "POL Demurrage", "POD_Demurrage": "POD Demurrage"})
             cost_chart = alt.Chart(cost_melt).mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4).encode(
@@ -1437,14 +1429,12 @@ with tab_ships:
             "POL_DEM_TOTAL_DAYS", "POL_DEM_CHARGEABLE_DAYS", "POL_DEM_COST",
             "POD_DEM_TOTAL_DAYS", "POD_DEM_CHARGEABLE_DAYS", "POD_DEM_COST",
             "POD_DET_TOTAL_DAYS", "POD_DET_CHARGEABLE_DAYS", "POD_DET_COST", "TOTAL_DD_COST",
-            "CONTRACT_TYPE", "DET_ACCUMULATING", "DET_END_SOURCE",
+            "CONTRACT_TYPE",
         ]
         show_df = fdf[[c for c in display_cols if c in fdf.columns]].sort_values(sort_col, ascending=False).head(top_n).copy()
         for dc in ["CGI", "CLL", "CDD", "CGO", "CER"]:
             if dc in show_df.columns:
                 show_df[dc] = pd.to_datetime(show_df[dc], errors="coerce").dt.strftime("%Y-%m-%d").fillna("—")
-        show_df["DET_STATUS"] = show_df.apply(lambda r: "⚠️ Active → Today" if r.get("DET_ACCUMULATING", False) else ("📅 Completed → Modified" if r.get("DET_END_SOURCE") == "MODIFIED_DATE" else "✓ CER"), axis=1)
-        show_df = show_df.drop(columns=["DET_ACCUMULATING", "DET_END_SOURCE"], errors="ignore")
         st.dataframe(show_df.style.format({"POL_DEM_COST": "${:,.2f}", "POD_DEM_COST": "${:,.2f}", "POD_DET_COST": "${:,.2f}", "TOTAL_DD_COST": "${:,.2f}"}), use_container_width=True, hide_index=True, height=600)
 
 # -----------------------------------------------------------------------------
@@ -1461,19 +1451,17 @@ with tab_gaps:
     else:
         gap_source = fill_grouping_blanks(ufdf)
         risk_df = gap_source[gap_source["RISK_FLAG"] == True].copy()
-        active_no_cer = gap_source[gap_source["DET_ACCUMULATING"] == True].copy()
-        c1, c2, c3, c4 = st.columns(4)
+        c1, c2, c3 = st.columns(3)
         c1.metric("Unmatched Shipments", f"{len(gap_source):,}")
         c2.metric("Risk Containers", f"{len(risk_df):,}", "above avg dwell")
         c3.metric("Missing Contract Keys", f"{gap_source['MATCH_KEY'].nunique():,}")
-        c4.metric("Active, No CER", f"{len(active_no_cer):,}", "detention may grow")
         st.markdown("---")
         st.markdown("#### Missing Contract Combinations")
         group_cols = ["POD_COUNTRY", "CONTAINER_TYPE", "IKEA_CONTAINER_TYPE", "CONTAINER_MAPPING_STATUS", "MATCH_KEY"] if rate_source == "Upload IKEA Tariff CSV" else ["POD_LOCODE", "CARRIER_FFW_SCAC", "MATCHED_PARTY_TYPE", "CARRIER_SCAC", "FFW_SCAC", "POL_LOCODE", "MATCH_KEY"]
         combo = gap_source.groupby([c for c in group_cols if c in gap_source.columns], dropna=False).agg(
             Shipments=("SHIPMENT_ID", "count"), Containers=("CONTAINER_NUMBER", lambda x: x.nunique()), Risk_Containers=("RISK_FLAG", lambda x: int(x.sum())),
             Avg_POL_Dem_Days=("POL_DEM_TOTAL_DAYS", "mean"), Avg_POD_Dem_Days=("POD_DEM_TOTAL_DAYS", "mean"), Avg_POD_Det_Days=("POD_DET_TOTAL_DAYS", "mean"),
-            Max_POD_Det_Days=("POD_DET_TOTAL_DAYS", "max"), Active_No_CER=("DET_ACCUMULATING", lambda x: int(x.sum())),
+            Max_POD_Det_Days=("POD_DET_TOTAL_DAYS", "max"),
         ).reset_index().sort_values(["Risk_Containers", "Shipments"], ascending=False)
         st.dataframe(combo.style.format({"Avg_POL_Dem_Days": "{:.1f}", "Avg_POD_Dem_Days": "{:.1f}", "Avg_POD_Det_Days": "{:.1f}", "Max_POD_Det_Days": "{:.1f}"}), use_container_width=True, hide_index=True)
         st.markdown("---")
@@ -1482,7 +1470,7 @@ with tab_gaps:
             "CONTAINER_NUMBER", "SHIPMENT_ID", "CONTAINER_TYPE", "IKEA_CONTAINER_TYPE", "CONTAINER_MAPPING_STATUS",
             "CARRIER_SCAC", "FFW_SCAC", "CARRIER_FFW_SCAC", "MATCHED_PARTY_TYPE", "LANE", "POD_COUNTRY",
             "CGI", "CLL", "CDD", "CGO", "CER",
-            "POL_DEM_TOTAL_DAYS", "POD_DEM_TOTAL_DAYS", "POD_DET_TOTAL_DAYS", "DET_ACCUMULATING",
+            "POL_DEM_TOTAL_DAYS", "POD_DEM_TOTAL_DAYS", "POD_DET_TOTAL_DAYS",
             "RISK_SCORE", "RISK_REASONS", "MATCH_KEY", "MISSING_CONTRACT_REASON", "DATA_LIMITATION",
         ]
         gap_show = gap_source[[c for c in gap_cols if c in gap_source.columns]].copy()
@@ -1564,7 +1552,7 @@ with tab_download:
                 "Metric": [
                     "Total Shipments in Upload", "Cancelled Excluded", "Matched / Priced Shipments", "Unmatched Shipments",
                     "Unmatched Risk Containers", "Total D&D Cost", "POL Demurrage", "POD Demurrage", "POD Detention",
-                    "Detention Accumulating", "Rate Source", "Analysis Date",
+                    "Rate Source", "Analysis Date",
                 ],
                 "Value": [
                     total_shipments, cancelled_count, len(rdf), len(unmatched_df),
@@ -1573,7 +1561,6 @@ with tab_download:
                     f"${rdf['POL_DEM_COST'].sum():,.2f}" if not rdf.empty else "$0.00",
                     f"${rdf['POD_DEM_COST'].sum():,.2f}" if not rdf.empty else "$0.00",
                     f"${rdf['POD_DET_COST'].sum():,.2f}" if not rdf.empty else "$0.00",
-                    int(rdf["DET_ACCUMULATING"].sum()) if not rdf.empty else 0,
                     rate_source,
                     datetime.now().strftime("%Y-%m-%d %H:%M"),
                 ],
