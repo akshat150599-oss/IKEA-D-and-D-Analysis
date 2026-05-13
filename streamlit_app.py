@@ -1435,16 +1435,26 @@ with tab_ships:
                 show_df[dc] = pd.to_datetime(show_df[dc], errors="coerce").dt.strftime("%Y-%m-%d").fillna("—")
         st.dataframe(show_df.style.format({"POL_DEM_COST": "${:,.2f}", "POD_DEM_COST": "${:,.2f}", "POD_DET_COST": "${:,.2f}", "TOTAL_DD_COST": "${:,.2f}"}), use_container_width=True, hide_index=True, height=600)
 
-        # Download ALL priced shipments as CSV (not limited to the top N shown above)
+        # --- Download ALL priced shipments (TOTAL_DD_COST > 0) as CSV ---
+        # Uses the exact same display_cols and date formatting as the table above,
+        # but includes ALL rows where D&D charges were calculated (no top_n cap).
         st.markdown("---")
-        all_priced_dl = build_download_df(fdf)
-        all_priced_csv = all_priced_dl.to_csv(index=False).encode("utf-8")
-        st.download_button(
-            f"📥 Download All {len(fdf):,} Priced Shipments as CSV",
-            data=all_priced_csv,
-            file_name=f"All_Priced_Shipments_{datetime.now().strftime('%Y-%m-%d')}.csv",
-            mime="text/csv",
-        )
+        priced_df = fdf[fdf["TOTAL_DD_COST"] > 0].copy()
+        if not priced_df.empty:
+            dl_cols = [c for c in display_cols if c in priced_df.columns]
+            priced_dl = priced_df[dl_cols].sort_values("TOTAL_DD_COST", ascending=False).copy()
+            for dc in ["CGI", "CLL", "CDD", "CGO", "CER"]:
+                if dc in priced_dl.columns:
+                    priced_dl[dc] = pd.to_datetime(priced_dl[dc], errors="coerce").dt.strftime("%Y-%m-%d").fillna("—")
+            csv_bytes = priced_dl.to_csv(index=False).encode("utf-8")
+            st.download_button(
+                f"📥 Download All {len(priced_dl):,} Priced Shipments (D&D > $0) as CSV",
+                data=csv_bytes,
+                file_name=f"Priced_Shipments_DD_{datetime.now().strftime('%Y-%m-%d')}.csv",
+                mime="text/csv",
+            )
+        else:
+            st.info("No shipments with D&D charges > $0 to download.")
 
 # -----------------------------------------------------------------------------
 # CONTRACT GAPS
