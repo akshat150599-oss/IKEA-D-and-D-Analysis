@@ -196,8 +196,9 @@ IKEA_REQUIRED_COLUMNS = [
 ]
 
 IKEA_CONTAINER_MAP = {
-    "20 ft standard container": "22GP",
-    "40 ft standard container": "42GP",
+    "20 FT STANDARD CONTAINER": "22GP",
+    "40 FT STANDARD CONTAINER": "42GP",
+    "40 FT HIGH CUBE CONTAINER": "42GP",
 }
 
 
@@ -209,16 +210,19 @@ def _clean_text(val):
             return ""
     except (TypeError, ValueError):
         pass
-    return str(val).strip()
+    return str(val).replace("\u00a0", " ").replace("\r", " ").replace("\n", " ").strip()
 
 
 def _norm_key(val):
-    return _clean_text(val).upper()
+    # Robust key cleanup: removes leading/trailing spaces, non-breaking spaces, line breaks,
+    # collapses repeated internal spaces, and uppercases both shipment and tariff values.
+    text = _clean_text(val)
+    return " ".join(text.split()).upper()
 
 
 def map_ikea_container_type(container_type):
     """Strict IKEA mapping for shipment container values supported by IKEA tariff."""
-    text = _clean_text(container_type).lower()
+    text = _norm_key(container_type)
     return IKEA_CONTAINER_MAP.get(text)
 
 
@@ -599,10 +603,13 @@ def process_shipments(df, contracts_list=None, estimate_profile=None, use_estima
 
     is_ikea = rate_mode == "IKEA Tariff CSV"
     if is_ikea:
+        df["IKEA_COUNTRY"] = df["DESTINATION_COUNTRY"].apply(_norm_key)
         df["IKEA_CONTAINER_TYPE"] = df["CONTAINER_TYPE"].apply(map_ikea_container_type)
         df["CONTAINER_MAPPING_STATUS"] = np.where(df["IKEA_CONTAINER_TYPE"].notna(), "MAPPED", "UNMAPPED")
-        df["POD_COUNTRY"] = df["DESTINATION_COUNTRY"].fillna("").astype(str).str.strip().str.upper()
-        df["_match_key"] = df["DESTINATION_COUNTRY"].fillna("").astype(str).str.strip().str.upper() + "|" + df["IKEA_CONTAINER_TYPE"].fillna("")
+        # Keep POD_COUNTRY populated for existing reporting tabs, but source it from DESTINATION_COUNTRY for IKEA.
+        df["POD_COUNTRY"] = df["IKEA_COUNTRY"]
+        df["_match_key"] = df["IKEA_COUNTRY"] + "|" + df["IKEA_CONTAINER_TYPE"].fillna("")
+        df["IKEA_MATCH_KEY"] = df["_match_key"]
     else:
         df["IKEA_CONTAINER_TYPE"] = ""
         df["CONTAINER_MAPPING_STATUS"] = ""
@@ -1044,7 +1051,8 @@ with st.sidebar:
     st.caption(
         'Mapping: "20 ft Standard Container" → 22GP; '
         '"40 ft Standard Container" → 42GP; '
-        '"40 ft High Cube Container" → 42GP. Everything else is a contract gap.'
+        '"40 ft High Cube Container" → 42GP. Everything else is a contract gap. '
+        'Country matching uses shipment DESTINATION_COUNTRY and tariff Port of discharge country after whitespace cleanup.'
     )
 
     uploaded_file = st.file_uploader(
