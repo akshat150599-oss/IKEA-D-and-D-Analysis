@@ -1,9 +1,9 @@
 """
-Demurrage & Detention Analyzer - IKEA-ready version
+Demurrage & Detention Analyzer - IKEA CSV version
 ====================================================
 
-This keeps the original D&D shipment/event/reporting logic and adds one IKEA
-contract path.
+This keeps the original D&D shipment/event/reporting logic and uses one IKEA
+CSV tariff path.
 
 Core shipment event logic retained:
   POL Demurrage = CLL - CGI
@@ -13,10 +13,11 @@ Core shipment event logic retained:
 IKEA contract logic:
   - Tariff match is country-level only.
   - Ignore Port of discharge state.
-  - Match shipment POD_COUNTRY to contract Port of discharge country.
-  - Strict container mapping only:
+  - Match shipment DESTINATION_COUNTRY to contract Port of discharge country.
+  - Container mapping:
       "20 ft Standard Container" -> 22GP
       "40 ft Standard Container" -> 42GP
+      "40 ft High Cube Container" -> 42GP
     Everything else is an unmapped contract gap.
   - IKEA file prices only POD demurrage and POD detention.
   - No tiers, no combined free days, no POL demurrage pricing.
@@ -101,7 +102,7 @@ st.markdown(
 )
 
 # -----------------------------------------------------------------------------
-# STANDARD CONTRACT CSV PARSER - retained for backwards compatibility
+# STANDARD CONTRACT HELPERS - retained internally, not exposed in IKEA-only UI
 # -----------------------------------------------------------------------------
 NUMERIC_CONTRACT_COLS = [
     "freeDemurrageDays",
@@ -216,14 +217,14 @@ def _norm_key(val):
 
 
 def map_ikea_container_type(container_type):
-    """Strict IKEA mapping. Only two shipment values are supported."""
+    """Strict IKEA mapping for shipment container values supported by IKEA tariff."""
     text = _clean_text(container_type).lower()
     return IKEA_CONTAINER_MAP.get(text)
 
 
-def parse_ikea_tariff_xlsx(contract_file):
-    """Read IKEA tariff workbook and create a lookup by POD country + container type."""
-    cdf = pd.read_excel(contract_file)
+def parse_ikea_tariff_csv(contract_file):
+    """Read IKEA tariff CSV and create a lookup by destination country + container type."""
+    cdf = pd.read_csv(contract_file)
     cdf.columns = [str(c).strip() for c in cdf.columns]
     missing = [c for c in IKEA_REQUIRED_COLUMNS if c not in cdf.columns]
     if missing:
@@ -596,11 +597,12 @@ def process_shipments(df, contracts_list=None, estimate_profile=None, use_estima
     df["CARRIER_FFW_SCAC"] = match_identity[0]
     df["MATCHED_PARTY_TYPE"] = match_identity[1]
 
-    is_ikea = rate_mode == "IKEA Tariff XLSX"
+    is_ikea = rate_mode == "IKEA Tariff CSV"
     if is_ikea:
         df["IKEA_CONTAINER_TYPE"] = df["CONTAINER_TYPE"].apply(map_ikea_container_type)
         df["CONTAINER_MAPPING_STATUS"] = np.where(df["IKEA_CONTAINER_TYPE"].notna(), "MAPPED", "UNMAPPED")
-        df["_match_key"] = df["POD_COUNTRY"].fillna("").astype(str).str.strip().str.upper() + "|" + df["IKEA_CONTAINER_TYPE"].fillna("")
+        df["POD_COUNTRY"] = df["DESTINATION_COUNTRY"].fillna("").astype(str).str.strip().str.upper()
+        df["_match_key"] = df["DESTINATION_COUNTRY"].fillna("").astype(str).str.strip().str.upper() + "|" + df["IKEA_CONTAINER_TYPE"].fillna("")
     else:
         df["IKEA_CONTAINER_TYPE"] = ""
         df["CONTAINER_MAPPING_STATUS"] = ""
@@ -623,14 +625,14 @@ def process_shipments(df, contracts_list=None, estimate_profile=None, use_estima
             base_record = _make_base_record(row, values, key, "IKEA Tariff" if tariff else matched_lookup_type)
             if tariff is None:
                 reasons = []
-                if not _clean_text(row.get("POD_COUNTRY")):
-                    reasons.append("Missing POD country")
+                if not _clean_text(row.get("DESTINATION_COUNTRY")):
+                    reasons.append("Missing destination country")
                 if not _clean_text(row.get("CONTAINER_TYPE")):
                     reasons.append("Missing container type")
                 if row.get("CONTAINER_MAPPING_STATUS") == "UNMAPPED":
                     reasons.append("Unsupported container type for IKEA tariff")
-                if _clean_text(row.get("POD_COUNTRY")) and row.get("CONTAINER_MAPPING_STATUS") == "MAPPED":
-                    reasons.append("No IKEA tariff for POD country | container type")
+                if _clean_text(row.get("DESTINATION_COUNTRY")) and row.get("CONTAINER_MAPPING_STATUS") == "MAPPED":
+                    reasons.append("No IKEA tariff for destination country | container type")
                 if pd.isna(values["cdd"]) or pd.isna(values["cgo"]):
                     reasons.append("Cannot evaluate POD demurrage; missing CDD or CGO")
                 if pd.isna(values["cgo"]):
@@ -639,7 +641,7 @@ def process_shipments(df, contracts_list=None, estimate_profile=None, use_estima
                     reasons.append("Cannot evaluate POD detention end; missing CER and status not ACTIVE/COMPLETED")
                 unmatched_record = base_record.copy()
                 unmatched_record.update({
-                    "MISSING_CONTRACT_REASON": "No IKEA tariff for POD country | container type",
+                    "MISSING_CONTRACT_REASON": "No IKEA tariff for destination country | container type",
                     "DATA_LIMITATION": "; ".join(reasons) if reasons else "Dwell days available; fees cannot be calculated without IKEA tariff",
                     "RISK_FLAG": False,
                     "RISK_REASONS": "",
@@ -930,7 +932,7 @@ def build_download_df(data):
         "POL_LOCODE": "Port of Loading",
         "POL_COUNTRY": "POL Country",
         "POD_LOCODE": "Port of Discharge",
-        "POD_COUNTRY": "POD Country",
+        "POD_COUNTRY": "Destination Country",
         "LANE": "Lane",
         "SUBSCRIPTION_STATUS": "Subscription Status",
         "CGI": "Gate In at POL (CGI)",
@@ -966,7 +968,7 @@ def build_download_df(data):
     desired_order = [
         "Shipment ID", "Container", "Container Type", "IKEA Contract Container Type", "Container Mapping Status",
         "Carrier SCAC", "Carrier Name", "Freight Forwarder SCAC", "Carrier / FFW SCAC", "Matched Party Type",
-        "Lane", "Port of Loading", "POL Country", "Port of Discharge", "POD Country", "Subscription Status",
+        "Lane", "Port of Loading", "POL Country", "Port of Discharge", "Destination Country", "Subscription Status",
         "Gate In at POL (CGI)", "Loaded on Vessel (CLL)", "Discharge at POD (CDD)",
         "Gate Out Full at POD (CGO)", "Empty Return (CER)", "Free Days Type",
         "Free Demurrage Days", "Free Detention Days", "Combined Free Days",
@@ -1001,7 +1003,7 @@ def build_unmatched_download_df(data):
         "POL_LOCODE": "Port of Loading",
         "POL_COUNTRY": "POL Country",
         "POD_LOCODE": "Port of Discharge",
-        "POD_COUNTRY": "POD Country",
+        "POD_COUNTRY": "Destination Country",
         "LANE": "Lane",
         "SUBSCRIPTION_STATUS": "Subscription Status",
         "CGI": "Gate In at POL (CGI)",
@@ -1031,100 +1033,35 @@ with st.sidebar:
     st.markdown("### 🚢 Demurrage & Detention Analyzer")
     st.markdown("---")
 
-    rate_source = st.radio(
-        "Rate Source",
-        ["Upload Contract CSV", "Upload IKEA Tariff XLSX", "Estimate Rates"],
-        help="Use the standard D&D contract CSV, the IKEA country/container tariff workbook, or estimate rates manually.",
+    rate_source = "Upload IKEA Tariff CSV"
+
+    uploaded_ikea_file = st.file_uploader(
+        "Upload IKEA Tariff CSV",
+        type=["csv"],
+        help="Upload IKEA tariff CSV. Matching is shipment DESTINATION_COUNTRY + mapped CONTAINER_TYPE.",
+        key="ikea_contract_uploader",
+    )
+    st.caption(
+        'Mapping: "20 ft Standard Container" → 22GP; '
+        '"40 ft Standard Container" → 42GP; '
+        '"40 ft High Cube Container" → 42GP. Everything else is a contract gap.'
     )
 
-    uploaded_contract_file = None
-    uploaded_ikea_file = None
-    estimate_profile = None
-
-    if rate_source == "Upload Contract CSV":
-        uploaded_contract_file = st.file_uploader(
-            "Upload Contract CSV", type=["csv"],
-            help="Upload the standard D&D contract terms CSV.", key="contract_uploader",
-        )
-    elif rate_source == "Upload IKEA Tariff XLSX":
-        uploaded_ikea_file = st.file_uploader(
-            "Upload IKEA Tariff XLSX", type=["xlsx"],
-            help="Upload IKEA tariff workbook. Matching is POD country + strict mapped container type.", key="ikea_contract_uploader",
-        )
-        st.caption('Strict mapping: "20 ft Standard Container" → 22GP; "40 ft Standard Container" → 42GP. Everything else is a contract gap.')
-    else:
-        st.markdown("#### Estimate Tariffs")
-        st.caption("All rates are USD/day. POL demurrage is always separate. Combined free days only applies to POD demurrage + POD detention.")
-        with st.expander("POL Demurrage Estimate", expanded=True):
-            pol_free_dem = st.number_input("POL free demurrage days", min_value=0.0, value=0.0, step=1.0)
-            pol_t1_days = st.number_input("POL Tier 1 days", min_value=0.0, value=0.0, step=1.0)
-            pol_t1_rate = st.number_input("POL Tier 1 rate (USD/day)", min_value=0.0, value=0.0, step=25.0)
-            pol_t2_days = st.number_input("POL Tier 2 days", min_value=0.0, value=0.0, step=1.0)
-            pol_t2_rate = st.number_input("POL Tier 2 rate (USD/day)", min_value=0.0, value=0.0, step=25.0)
-            pol_thereafter_rate = st.number_input("POL thereafter rate (USD/day)", min_value=0.0, value=0.0, step=25.0)
-        with st.expander("POD Free Days", expanded=True):
-            use_combined_pod_free = st.checkbox("Use combined POD free days for POD demurrage + POD detention", value=False)
-            if use_combined_pod_free:
-                combined_pod_free_days = st.number_input("Combined POD free days", min_value=0.0, value=0.0, step=1.0)
-                pod_free_dem = 0.0
-                pod_free_det = 0.0
-            else:
-                combined_pod_free_days = None
-                pod_free_dem = st.number_input("POD free demurrage days", min_value=0.0, value=0.0, step=1.0)
-                pod_free_det = st.number_input("POD free detention days", min_value=0.0, value=0.0, step=1.0)
-        with st.expander("POD Demurrage Estimate", expanded=True):
-            pod_t1_days = st.number_input("POD demurrage Tier 1 days", min_value=0.0, value=0.0, step=1.0)
-            pod_t1_rate = st.number_input("POD demurrage Tier 1 rate (USD/day)", min_value=0.0, value=0.0, step=25.0)
-            pod_t2_days = st.number_input("POD demurrage Tier 2 days", min_value=0.0, value=0.0, step=1.0)
-            pod_t2_rate = st.number_input("POD demurrage Tier 2 rate (USD/day)", min_value=0.0, value=0.0, step=25.0)
-            pod_thereafter_rate = st.number_input("POD demurrage thereafter rate (USD/day)", min_value=0.0, value=0.0, step=25.0)
-        with st.expander("POD Detention Estimate", expanded=True):
-            det_t1_days = st.number_input("POD detention Tier 1 days", min_value=0.0, value=0.0, step=1.0)
-            det_t1_rate = st.number_input("POD detention Tier 1 rate (USD/day)", min_value=0.0, value=0.0, step=25.0)
-            det_t2_days = st.number_input("POD detention Tier 2 days", min_value=0.0, value=0.0, step=1.0)
-            det_t2_rate = st.number_input("POD detention Tier 2 rate (USD/day)", min_value=0.0, value=0.0, step=25.0)
-            det_thereafter_rate = st.number_input("POD detention thereafter rate (USD/day)", min_value=0.0, value=0.0, step=25.0)
-        estimate_profile = make_estimate_contract_profile(
-            pol_free_dem, pol_t1_days, pol_t1_rate, pol_t2_days, pol_t2_rate, pol_thereafter_rate,
-            use_combined_pod_free, combined_pod_free_days,
-            pod_free_dem, pod_t1_days, pod_t1_rate, pod_t2_days, pod_t2_rate, pod_thereafter_rate,
-            pod_free_det, det_t1_days, det_t1_rate, det_t2_days, det_t2_rate, det_thereafter_rate,
-        )
-
-    uploaded_file = st.file_uploader("Upload Shipment CSV", type=["csv"], help="Upload the ocean shipment export CSV with milestone events.", key="shipment_uploader")
+    uploaded_file = st.file_uploader(
+        "Upload Shipment CSV",
+        type=["csv"],
+        help="Upload the ocean shipment export CSV with milestone events.",
+        key="shipment_uploader",
+    )
     st.markdown("---")
 
-contracts_list = None
-contracts_df = None
 ikea_lookup = None
 ikea_records = None
 ikea_df = None
 
-if rate_source == "Upload Contract CSV" and uploaded_contract_file is not None:
+if uploaded_ikea_file is not None:
     try:
-        contracts_list, contracts_df = parse_contracts_csv(uploaded_contract_file)
-        with st.sidebar:
-            st.success(f"✅ Loaded {len(contracts_list)} contract rows")
-            terminals = sorted(set(c.get("terminalIdentifier", "") for c in contracts_list if c.get("terminalIdentifier")))
-            carrier_scacs = sorted(set(c.get("carrierScac", "") for c in contracts_list if c.get("carrierScac")))
-            ffw_scacs = sorted(set(c.get("ffwScac", "") for c in contracts_list if c.get("ffwScac")))
-            pol_dem_rows = sum(1 for c in contracts_list if _event_scope(c.get("demurrageStartEventType")) == "POL" and _has_demurrage_terms(c))
-            pod_dem_rows = sum(1 for c in contracts_list if _event_scope(c.get("demurrageStartEventType")) == "POD" and _has_demurrage_terms(c))
-            det_rows = sum(1 for c in contracts_list if _has_detention_terms(c))
-            st.markdown(f"**Contract rows:** {len(contracts_list)}")
-            st.markdown(f"**POL dem rows:** {pol_dem_rows:,} | **POD dem rows:** {pod_dem_rows:,} | **Det rows:** {det_rows:,}")
-            st.markdown(f"**Terminals:** {', '.join(terminals) if terminals else '—'}")
-            carriers_display = carrier_scacs.copy()
-            if ffw_scacs:
-                carriers_display += [f"{s} (FFW)" for s in ffw_scacs]
-            st.markdown(f"**Carriers/FFWs:** {', '.join(carriers_display) if carriers_display else '—'}")
-    except Exception as e:
-        st.sidebar.error(f"❌ Error parsing contract CSV: {e}")
-        contracts_list = None
-
-if rate_source == "Upload IKEA Tariff XLSX" and uploaded_ikea_file is not None:
-    try:
-        ikea_records, ikea_df, ikea_lookup = parse_ikea_tariff_xlsx(uploaded_ikea_file)
+        ikea_records, ikea_df, ikea_lookup = parse_ikea_tariff_csv(uploaded_ikea_file)
         with st.sidebar:
             st.success(f"✅ Loaded {len(ikea_lookup)} IKEA country/container tariffs")
             countries = sorted(set(r["POD_COUNTRY"] for r in ikea_records))
@@ -1133,32 +1070,30 @@ if rate_source == "Upload IKEA Tariff XLSX" and uploaded_ikea_file is not None:
             st.markdown(f"**Contract container types:** {', '.join(containers) if containers else '—'}")
             st.markdown("**Pricing:** flat POD demurrage + flat POD detention")
     except Exception as e:
-        st.sidebar.error(f"❌ Error parsing IKEA tariff workbook: {e}")
+        st.sidebar.error(f"❌ Error parsing IKEA tariff CSV: {e}")
         ikea_lookup = None
 
 # -----------------------------------------------------------------------------
 # LANDING PAGE
 # -----------------------------------------------------------------------------
-missing_standard_contract = rate_source == "Upload Contract CSV" and uploaded_contract_file is None
-missing_ikea_contract = rate_source == "Upload IKEA Tariff XLSX" and uploaded_ikea_file is None
+missing_ikea_contract = uploaded_ikea_file is None
 missing_shipments = uploaded_file is None
-if missing_standard_contract or missing_ikea_contract or missing_shipments:
+if missing_ikea_contract or missing_shipments:
     st.markdown("## 🚢 Demurrage & Detention Analyzer")
     st.markdown("---")
-    if missing_shipments and (missing_standard_contract or missing_ikea_contract):
-        st.info("Upload both the selected rate file and a **Shipment CSV** from the sidebar to get started, or switch Rate Source to **Estimate Rates**.")
+    if missing_ikea_contract and missing_shipments:
+        st.info("Upload both the **IKEA Tariff CSV** and a **Shipment CSV** from the sidebar to get started.")
+    elif missing_ikea_contract:
+        st.info("Upload the **IKEA Tariff CSV** from the sidebar.")
     elif missing_shipments:
         st.info("Upload a **Shipment CSV** from the sidebar to continue.")
-    elif missing_standard_contract:
-        st.info("Upload a **Contract CSV** from the sidebar, or switch Rate Source.")
-    elif missing_ikea_contract:
-        st.info("Upload the **IKEA Tariff XLSX** from the sidebar, or switch Rate Source.")
 
     st.markdown("**IKEA tariff behavior:**")
     st.code(
-        "Port of discharge country -> matched to shipment POD_COUNTRY\n"
-        "Container type 22GP -> shipment '20 ft Standard Container' only\n"
-        "Container type 42GP -> shipment '40 ft Standard Container' only\n"
+        "Contract Port of discharge country -> matched to shipment DESTINATION_COUNTRY\n"
+        "Shipment CONTAINER_TYPE '20 ft Standard Container' -> contract 22GP\n"
+        "Shipment CONTAINER_TYPE '40 ft Standard Container' -> contract 42GP\n"
+        "Shipment CONTAINER_TYPE '40 ft High Cube Container' -> contract 42GP\n"
         "Demurrage Free Time / Tariff -> POD demurrage flat pricing\n"
         "Detention Freetime / Tariff -> POD detention flat pricing\n"
         "Port of discharge state -> ignored\n"
@@ -1175,26 +1110,22 @@ if missing_standard_contract or missing_ikea_contract or missing_shipments:
     )
     st.stop()
 
-if rate_source == "Upload Contract CSV" and contracts_list is None:
-    st.error("Contract file could not be parsed. Please check the format and re-upload, or switch Rate Source.")
-    st.stop()
-if rate_source == "Upload IKEA Tariff XLSX" and ikea_lookup is None:
-    st.error("IKEA tariff file could not be parsed. Please check the format and re-upload, or switch Rate Source.")
+if ikea_lookup is None:
+    st.error("IKEA tariff CSV could not be parsed. Please check the format and re-upload.")
     st.stop()
 
 # -----------------------------------------------------------------------------
 # LOAD AND PROCESS
 # -----------------------------------------------------------------------------
-process_label = "estimate rates" if rate_source == "Estimate Rates" else ("IKEA tariffs" if rate_source == "Upload IKEA Tariff XLSX" else "uploaded contracts")
-with st.spinner(f"Processing shipments against {process_label}..."):
+with st.spinner("Processing shipments against IKEA tariffs..."):
     raw_df = pd.read_csv(uploaded_file)
     rdf, unmatched_df, total_shipments, cancelled_count = process_shipments(
         raw_df,
-        contracts_list=contracts_list,
-        estimate_profile=estimate_profile,
-        use_estimate=(rate_source == "Estimate Rates"),
+        contracts_list=None,
+        estimate_profile=None,
+        use_estimate=False,
         ikea_lookup=ikea_lookup,
-        rate_mode="IKEA Tariff XLSX" if rate_source == "Upload IKEA Tariff XLSX" else "Standard Contract",
+        rate_mode="IKEA Tariff CSV",
     )
 
 if rdf.empty and unmatched_df.empty:
@@ -1226,8 +1157,8 @@ with st.sidebar:
 
     sel_carriers = st.multiselect("Carrier / FFW", carriers, default=carriers)
     sel_pods = st.multiselect("POD Terminal", pods, default=pods)
-    if rate_source == "Upload IKEA Tariff XLSX":
-        sel_countries = st.multiselect("POD Country", countries, default=countries)
+    if rate_source == "Upload IKEA Tariff CSV":
+        sel_countries = st.multiselect("Destination Country", countries, default=countries)
         sel_container_types = st.multiselect("Container Type", container_types, default=container_types)
     else:
         sel_countries = countries
@@ -1303,8 +1234,8 @@ tab_overview, tab_trends, tab_carrier, tab_port, tab_ships, tab_gaps, tab_tiers,
 # -----------------------------------------------------------------------------
 with tab_overview:
     st.markdown("### Executive Summary")
-    if rate_source == "Upload IKEA Tariff XLSX":
-        st.caption("IKEA mode: matching is POD country + strict mapped container type. POL demurrage is shown as days but not priced from the IKEA tariff.")
+    if rate_source == "Upload IKEA Tariff CSV":
+        st.caption("IKEA mode: matching is destination country + strict mapped container type. POL demurrage is shown as days but not priced from the IKEA tariff.")
     if fdf.empty:
         st.warning("No matched shipments available for the selected filters.")
     else:
@@ -1339,18 +1270,18 @@ with tab_overview:
         ).properties(title="D&D Cost by Carrier / FFW", height=280)
         st.altair_chart(chart_carrier, use_container_width=True)
 
-        pod_group = "POD_COUNTRY" if rate_source == "Upload IKEA Tariff XLSX" else "POD_LOCODE"
+        pod_group = "POD_COUNTRY" if rate_source == "Upload IKEA Tariff CSV" else "POD_LOCODE"
         pod_agg = fdf.groupby(pod_group).agg(
             POL_Demurrage=("POL_DEM_COST", "sum"), POD_Demurrage=("POD_DEM_COST", "sum"), POD_Detention=("POD_DET_COST", "sum")
         ).reset_index()
         pod_melt = pod_agg.melt(id_vars=pod_group, var_name="Type", value_name="Cost")
         pod_melt["Type"] = pod_melt["Type"].replace({"POL_Demurrage": "POL Demurrage", "POD_Demurrage": "POD Demurrage", "POD_Detention": "POD Detention"})
         chart_pod = alt.Chart(pod_melt).mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4).encode(
-            y=alt.Y(f"{pod_group}:N", sort="-x", title="POD Country" if pod_group == "POD_COUNTRY" else "POD Terminal"),
+            y=alt.Y(f"{pod_group}:N", sort="-x", title="Destination Country" if pod_group == "POD_COUNTRY" else "POD Terminal"),
             x=alt.X("Cost:Q", title="Cost (USD)"),
             color=alt.Color("Type:N", scale=alt.Scale(domain=["POL Demurrage", "POD Demurrage", "POD Detention"], range=[POL_DEM_COLOR, DEM_COLOR, DET_COLOR])),
             tooltip=[pod_group, "Type", alt.Tooltip("Cost:Q", format="$,.0f")],
-        ).properties(title="D&D Cost by POD Country" if pod_group == "POD_COUNTRY" else "D&D Cost by POD Terminal", height=250)
+        ).properties(title="D&D Cost by Destination Country" if pod_group == "POD_COUNTRY" else "D&D Cost by POD Terminal", height=250)
         st.altair_chart(chart_pod, use_container_width=True)
 
 # -----------------------------------------------------------------------------
@@ -1440,7 +1371,7 @@ with tab_carrier:
 
         st.markdown("---")
         st.markdown("#### Carrier / FFW × POD Breakdown")
-        pod_col = "POD_COUNTRY" if rate_source == "Upload IKEA Tariff XLSX" else "POD_LOCODE"
+        pod_col = "POD_COUNTRY" if rate_source == "Upload IKEA Tariff CSV" else "POD_LOCODE"
         cp = fdf.groupby(["CARRIER_FFW_SCAC", "MATCHED_PARTY_TYPE", pod_col], dropna=False).agg(
             Ships=("SHIPMENT_ID", "count"), POL_Dem=("POL_DEM_COST", "sum"), POD_Dem=("POD_DEM_COST", "sum"), Det=("POD_DET_COST", "sum")
         ).reset_index()
@@ -1456,8 +1387,8 @@ with tab_port:
     if fdf.empty:
         st.warning("No matched shipments available for the selected filters.")
     else:
-        group_col = "POD_COUNTRY" if rate_source == "Upload IKEA Tariff XLSX" else "POD_LOCODE"
-        st.markdown("#### POD Country Summary" if group_col == "POD_COUNTRY" else "#### POD Terminal Summary")
+        group_col = "POD_COUNTRY" if rate_source == "Upload IKEA Tariff CSV" else "POD_LOCODE"
+        st.markdown("#### Destination Country Summary" if group_col == "POD_COUNTRY" else "#### POD Terminal Summary")
         pod_sum = fdf.groupby(group_col).agg(
             Ships=("SHIPMENT_ID", "count"), POL_Dem=("POL_DEM_COST", "sum"), POD_Dem=("POD_DEM_COST", "sum"), Det=("POD_DET_COST", "sum")
         ).reset_index()
@@ -1513,8 +1444,8 @@ with tab_ships:
 # -----------------------------------------------------------------------------
 with tab_gaps:
     st.markdown("### ⚠️ Contract Gaps")
-    if rate_source == "Upload IKEA Tariff XLSX":
-        st.caption("For IKEA, contract gaps include missing POD country, unsupported container type, or no tariff for POD country + mapped container type.")
+    if rate_source == "Upload IKEA Tariff CSV":
+        st.caption("For IKEA, contract gaps include missing destination country, unsupported container type, or no tariff for destination country + mapped container type.")
     else:
         st.caption("These shipments did not match a contract, so fees are not calculated.")
     if ufdf.empty:
@@ -1530,7 +1461,7 @@ with tab_gaps:
         c4.metric("Active, No CER", f"{len(active_no_cer):,}", "detention may grow")
         st.markdown("---")
         st.markdown("#### Missing Contract Combinations")
-        group_cols = ["POD_COUNTRY", "CONTAINER_TYPE", "IKEA_CONTAINER_TYPE", "CONTAINER_MAPPING_STATUS", "MATCH_KEY"] if rate_source == "Upload IKEA Tariff XLSX" else ["POD_LOCODE", "CARRIER_FFW_SCAC", "MATCHED_PARTY_TYPE", "CARRIER_SCAC", "FFW_SCAC", "POL_LOCODE", "MATCH_KEY"]
+        group_cols = ["POD_COUNTRY", "CONTAINER_TYPE", "IKEA_CONTAINER_TYPE", "CONTAINER_MAPPING_STATUS", "MATCH_KEY"] if rate_source == "Upload IKEA Tariff CSV" else ["POD_LOCODE", "CARRIER_FFW_SCAC", "MATCHED_PARTY_TYPE", "CARRIER_SCAC", "FFW_SCAC", "POL_LOCODE", "MATCH_KEY"]
         combo = gap_source.groupby([c for c in group_cols if c in gap_source.columns], dropna=False).agg(
             Shipments=("SHIPMENT_ID", "count"), Containers=("CONTAINER_NUMBER", lambda x: x.nunique()), Risk_Containers=("RISK_FLAG", lambda x: int(x.sum())),
             Avg_POL_Dem_Days=("POL_DEM_TOTAL_DAYS", "mean"), Avg_POD_Dem_Days=("POD_DEM_TOTAL_DAYS", "mean"), Avg_POD_Det_Days=("POD_DET_TOTAL_DAYS", "mean"),
@@ -1560,7 +1491,7 @@ with tab_gaps:
 # -----------------------------------------------------------------------------
 with tab_tiers:
     st.markdown("### 🔥 Tier Exposure")
-    if rate_source == "Upload IKEA Tariff XLSX":
+    if rate_source == "Upload IKEA Tariff CSV":
         st.info("IKEA tariffs are flat-rate after free days. Tier 1 below represents all flat-rate chargeable days; Tier 2 and Thereafter remain zero.")
     if fdf.empty:
         st.warning("No matched shipments available for the selected filters.")
@@ -1640,18 +1571,8 @@ with tab_download:
                 ],
             }
             pd.DataFrame(summary_data).to_excel(writer, sheet_name="Summary", index=False)
-            if contracts_df is not None:
-                contracts_df.to_excel(writer, sheet_name="Contracts", index=False)
             if ikea_df is not None:
                 ikea_df.to_excel(writer, sheet_name="IKEA Tariffs", index=False)
-            elif estimate_profile is not None:
-                estimate_rows = []
-                for charge_name, key in [("POL Demurrage", "pol_dem"), ("POD Demurrage", "pod_dem"), ("POD Detention", "pod_det")]:
-                    rec = estimate_profile.get(key) or {}
-                    row = {"Charge Type": charge_name}
-                    row.update(rec)
-                    estimate_rows.append(row)
-                pd.DataFrame(estimate_rows).to_excel(writer, sheet_name="Estimate Rates", index=False)
         st.download_button("📥 Download Excel Workbook", data=buffer.getvalue(), file_name=f"Demurrage_Detention_Analyzer_{datetime.now().strftime('%Y-%m-%d')}.xlsx", mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     except ImportError:
         st.info("Excel download requires openpyxl. Add openpyxl to requirements.txt, or use CSV downloads above.")
