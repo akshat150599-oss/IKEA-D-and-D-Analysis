@@ -1,9 +1,7 @@
-"""
-Demurrage & Detention Analyzer - IKEA CSV version
+""" Demurrage & Detention Analyzer - IKEA CSV version
 ====================================================
 
-This keeps the original D&D shipment/event/reporting logic and uses one IKEA
-CSV tariff path.
+This keeps the original D&D shipment/event/reporting logic and uses one IKEA CSV tariff path.
 
 Core shipment event logic retained:
   POL Demurrage = CLL - CGI
@@ -1436,6 +1434,17 @@ with tab_ships:
             if dc in show_df.columns:
                 show_df[dc] = pd.to_datetime(show_df[dc], errors="coerce").dt.strftime("%Y-%m-%d").fillna("—")
         st.dataframe(show_df.style.format({"POL_DEM_COST": "${:,.2f}", "POD_DEM_COST": "${:,.2f}", "POD_DET_COST": "${:,.2f}", "TOTAL_DD_COST": "${:,.2f}"}), use_container_width=True, hide_index=True, height=600)
+
+        # Download ALL priced shipments as CSV (not limited to the top N shown above)
+        st.markdown("---")
+        all_priced_dl = build_download_df(fdf)
+        all_priced_csv = all_priced_dl.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            f"📥 Download All {len(fdf):,} Priced Shipments as CSV",
+            data=all_priced_csv,
+            file_name=f"All_Priced_Shipments_{datetime.now().strftime('%Y-%m-%d')}.csv",
+            mime="text/csv",
+        )
 
 # -----------------------------------------------------------------------------
 # CONTRACT GAPS
